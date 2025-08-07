@@ -8,10 +8,19 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <map>
 
-// Функция сканирования портов в заданном диапазоне
-std::vector<int> scan_ports(const std::string& ip, int start, int end) {
-    std::vector<int> open_ports;
+// Добавляем перечисление и структуру для хранения статуса порта
+enum class PortStatus { Open, Closed, Filtered };
+
+struct PortResult {
+    int port;
+    PortStatus status;
+};
+
+// Добавлена фильтрация портов
+std::vector<PortResult> scan_ports(const std::string& ip, int start, int end) {
+    std::vector<PortResult> results;
 
     for (int port = start; port <= end; port++) {
         int sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -26,10 +35,8 @@ std::vector<int> scan_ports(const std::string& ip, int start, int end) {
 
         int res = connect(sock, (sockaddr*)&addr, sizeof(addr));
         if (res == 0) {
-            // Соединение установлено сразу
-            open_ports.push_back(port);
+            results.push_back({port, PortStatus::Open});
         } else if (errno == EINPROGRESS) {
-            // Соединение в процессе, проверяем с помощью select
             fd_set write_fds;
             FD_ZERO(&write_fds);
             FD_SET(sock, &write_fds);
@@ -44,47 +51,51 @@ std::vector<int> scan_ports(const std::string& ip, int start, int end) {
                 socklen_t len = sizeof(error);
                 if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &len) == 0) {
                     if (error == 0) {
-                        // Соединение установлено успешно
-                        open_ports.push_back(port);
+                        results.push_back({port, PortStatus::Open});
+                    } else if (error == ECONNREFUSED) {
+                        results.push_back({port, PortStatus::Closed});
+                    } else {
+                        results.push_back({port, PortStatus::Filtered});
                     }
-                    // Если error != 0, порт закрыт, но мы это не выводим
+                } else {
+                    results.push_back({port, PortStatus::Filtered});
                 }
+            } else {
+                // select timeout или ошибка
+                results.push_back({port, PortStatus::Filtered});
             }
+        } else if (errno == ECONNREFUSED) {
+            results.push_back({port, PortStatus::Closed});
+        } else {
+            results.push_back({port, PortStatus::Filtered});
         }
         close(sock);
     }
-    return open_ports;
+    return results;
 }
 
 
 int main(int argc, char* argv[]) {
-    // Проверка аргументов командной строки
     if (argc != 5) {
         std::cerr << "Usage: " << argv[0] << " <ip> <start_port> <end_port> <num_threads>" << std::endl;
         return 1;
     }
 
-    // Парсинг аргументов
     std::string ip = argv[1];
     int start_port = std::stoi(argv[2]);
     int end_port = std::stoi(argv[3]);
     int num_threads = std::stoi(argv[4]);
 
-    // Валидация входных данных
     if (start_port > end_port || num_threads <= 0) {
         std::cerr << "Invalid arguments: start_port must be <= end_port, num_threads must be > 0" << std::endl;
         return 1;
     }
 
-    // Вычисление размера поддиапазона для каждого потока
     int total_ports = end_port - start_port + 1;
     int ports_per_thread = total_ports / num_threads;
     int extra_ports = total_ports % num_threads;
+    std::vector<std::future<std::vector<PortResult>>> futures;
 
-    // Вектор для хранения асинхронных задач
-    std::vector<std::future<std::vector<int>>> futures;
-
-    // Запуск потоков
     for (int i = 0; i < num_threads; i++) {
         int thread_start = start_port + i * ports_per_thread;
         int thread_end = thread_start + ports_per_thread - 1;
@@ -94,12 +105,21 @@ int main(int argc, char* argv[]) {
         futures.push_back(std::move(fut));
     }
 
-    // Сбор и вывод результатов
+    std::map<int, PortStatus> all_results;
     for (auto& fut : futures) {
-        auto open_ports = fut.get();
-        for (int port : open_ports) {
-            std::cout << "Port " << port << " is open" << std::endl;
+        auto port_results = fut.get();
+        for (const auto& pr : port_results) {
+            all_results[pr.port] = pr.status;
         }
+    }
+    for (const auto& [port, status] : all_results) {
+        std::string status_str;
+        switch (status) {
+            case PortStatus::Open: status_str = "open"; break;
+            case PortStatus::Closed: status_str = "closed"; break;
+            case PortStatus::Filtered: status_str = "filtered"; break;
+        }
+        std::cout << "Port " << port << " is " << status_str << std::endl;
     }
 
     return 0;
