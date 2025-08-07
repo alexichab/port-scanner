@@ -9,6 +9,10 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <map>
+#include <csignal>
+#include <atomic>
+#include <fstream>
+#include <iomanip>
 
 // Добавляем перечисление и структуру для хранения статуса порта
 enum class PortStatus { Open, Closed, Filtered };
@@ -74,11 +78,52 @@ std::vector<PortResult> scan_ports(const std::string& ip, int start, int end) {
     return results;
 }
 
+std::atomic<bool> interrupted{false};
+
+void signal_handler(int) {
+    interrupted = true;
+}
+
+void print_help(const char* progname) {
+    std::cout <<
+        "Usage: " << progname << " <ip> <start_port> <end_port> <num_threads> [--open-only] [--output <file>] [--help]\n"
+        "  <ip>           - IP address to scan\n"
+        "  <start_port>   - Start of port range\n"
+        "  <end_port>     - End of port range\n"
+        "  <num_threads>  - Number of threads\n"
+        "Options:\n"
+        "  --open-only    - Show only open ports\n"
+        "  --output FILE  - Write results to FILE\n"
+        "  --help         - Show this help message\n";
+}
 
 int main(int argc, char* argv[]) {
-    if (argc != 5) {
-        std::cerr << "Usage: " << argv[0] << " <ip> <start_port> <end_port> <num_threads>" << std::endl;
+    std::signal(SIGINT, signal_handler);
+
+    // Аргументы
+    if (argc < 5) {
+        print_help(argv[0]);
         return 1;
+    }
+
+    // Парсим опции
+    bool open_only = false;
+    std::string output_file;
+    for (int i = 5; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--open-only") open_only = true;
+        else if (arg == "--help") {
+            print_help(argv[0]);
+            return 0;
+        }
+        else if (arg == "--output" && i + 1 < argc) {
+            output_file = argv[++i];
+        }
+        else {
+            std::cerr << "Unknown option: " << arg << std::endl;
+            print_help(argv[0]);
+            return 1;
+        }
     }
 
     std::string ip = argv[1];
@@ -92,16 +137,36 @@ int main(int argc, char* argv[]) {
     }
 
     int total_ports = end_port - start_port + 1;
+    if (num_threads > total_ports) num_threads = total_ports; // Оптимизация потоков
+
     int ports_per_thread = total_ports / num_threads;
     int extra_ports = total_ports % num_threads;
     std::vector<std::future<std::vector<PortResult>>> futures;
 
-    for (int i = 0; i < num_threads; i++) {
-        int thread_start = start_port + i * ports_per_thread;
-        int thread_end = thread_start + ports_per_thread - 1;
-        if (i == num_threads - 1) thread_end += extra_ports;  // Учет остатка портов
+    std::atomic<int> scanned_ports{0};
 
-        auto fut = std::async(std::launch::async, scan_ports, ip, thread_start, thread_end);
+    auto scan_ports_progress = [&](const std::string& ip, int start, int end) {
+        std::vector<PortResult> results;
+        for (int port = start; port <= end; port++) {
+            if (interrupted) break;
+            auto res = scan_ports(ip, port, port);
+            results.insert(results.end(), res.begin(), res.end());
+            ++scanned_ports;
+            // Прогресс-бар
+            int percent = (100 * scanned_ports) / total_ports;
+            std::cout << "\rScanning: " << percent << "% (" << scanned_ports << "/" << total_ports << ")   " << std::flush;
+        }
+        return results;
+    };
+    int current_port = start_port;
+    for (int i = 0; i < num_threads; i++) {
+        int thread_start = current_port;
+        int thread_end = thread_start + ports_per_thread - 1;
+        if (i < extra_ports) thread_end++;
+        if (thread_end > end_port) thread_end = end_port;
+        current_port = thread_end + 1;
+
+        auto fut = std::async(std::launch::async, scan_ports_progress, ip, thread_start, thread_end);
         futures.push_back(std::move(fut));
     }
 
@@ -112,14 +177,32 @@ int main(int argc, char* argv[]) {
             all_results[pr.port] = pr.status;
         }
     }
+    std::cout << "\rScanning: 100% (" << scanned_ports << "/" << total_ports << ")   " << std::endl;
+
+    std::ostream* out = &std::cout;
+    std::ofstream fout;
+    if (!output_file.empty()) {
+        fout.open(output_file);
+        if (!fout) {
+            std::cerr << "Failed to open output file: " << output_file << std::endl;
+            return 1;
+        }
+        out = &fout;
+    }
+
     for (const auto& [port, status] : all_results) {
+        if (open_only && status != PortStatus::Open) continue;
         std::string status_str;
         switch (status) {
             case PortStatus::Open: status_str = "open"; break;
             case PortStatus::Closed: status_str = "closed"; break;
             case PortStatus::Filtered: status_str = "filtered"; break;
         }
-        std::cout << "Port " << port << " is " << status_str << std::endl;
+        *out << "Port " << port << " is " << status_str << std::endl;
+    }
+
+    if (interrupted) {
+        *out << "\nScan interrupted by user. Partial results shown above.\n";
     }
 
     return 0;
