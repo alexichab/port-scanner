@@ -13,6 +13,8 @@
 #include <atomic>
 #include <fstream>
 #include <iomanip>
+#include <thread>
+#include <chrono>
 
 // Добавляем перечисление и структуру для хранения статуса порта
 enum class PortStatus { Open, Closed, Filtered };
@@ -144,6 +146,21 @@ int main(int argc, char* argv[]) {
     std::vector<std::future<std::vector<PortResult>>> futures;
 
     std::atomic<int> scanned_ports{0};
+    std::atomic<bool> progress_done{false};
+
+    std::thread progress_thread([&]() {
+        int last_percent = -1;
+        while (!progress_done) {
+            int percent = (100 * scanned_ports) / total_ports;
+            if (percent != last_percent) {
+                std::cout << "\rScanning: " << percent << "% (" << scanned_ports << "/" << total_ports << ")   " << std::flush;
+                last_percent = percent;
+            }
+            if (scanned_ports >= total_ports) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        std::cout << "\rScanning: 100% (" << scanned_ports << "/" << total_ports << ")   " << std::endl;
+    });
 
     auto scan_ports_progress = [&](const std::string& ip, int start, int end) {
         std::vector<PortResult> results;
@@ -152,12 +169,10 @@ int main(int argc, char* argv[]) {
             auto res = scan_ports(ip, port, port);
             results.insert(results.end(), res.begin(), res.end());
             ++scanned_ports;
-            // Прогресс-бар
-            int percent = (100 * scanned_ports) / total_ports;
-            std::cout << "\rScanning: " << percent << "% (" << scanned_ports << "/" << total_ports << ")   " << std::flush;
         }
         return results;
     };
+    
     int current_port = start_port;
     for (int i = 0; i < num_threads; i++) {
         int thread_start = current_port;
@@ -177,7 +192,8 @@ int main(int argc, char* argv[]) {
             all_results[pr.port] = pr.status;
         }
     }
-    std::cout << "\rScanning: 100% (" << scanned_ports << "/" << total_ports << ")   " << std::endl;
+    progress_done = true;
+    progress_thread.join();
 
     std::ostream* out = &std::cout;
     std::ofstream fout;
