@@ -25,7 +25,7 @@ struct PortResult {
 };
 
 // Добавлена фильтрация портов
-std::vector<PortResult> scan_ports(const std::string &ip, int start, int end) {
+std::vector<PortResult> scan_ports(const std::string &ip, int start, int end, int timeout_sec) {
   std::vector<PortResult> results;
 
   for (int port = start; port <= end; port++) {
@@ -49,7 +49,7 @@ std::vector<PortResult> scan_ports(const std::string &ip, int start, int end) {
       FD_SET(sock, &write_fds);
 
       timeval tv;
-      tv.tv_sec = 1;
+      tv.tv_sec = timeout_sec;
       tv.tv_usec = 0;
 
       res = select(sock + 1, NULL, &write_fds, NULL, &tv);
@@ -87,12 +87,13 @@ void signal_handler(int) { interrupted = true; }
 
 void print_help(const char *progname) {
   std::cout << "Usage: " << progname
-            << " <ip> <start_port> <end_port> <num_threads> [--open-only] "
+            << " <ip> <start_port> <end_port> <num_threads> [timeout_sec] [--open-only] "
                "[--output <file>] [--help]\n"
                "  <ip>           - IP address to scan\n"
                "  <start_port>   - Start of port range\n"
                "  <end_port>     - End of port range\n"
                "  <num_threads>  - Number of threads\n"
+               "  [timeout_sec]  - Optional connect timeout in seconds (default: 1 second)\n"
                "Options:\n"
                "  --open-only    - Show only open ports\n"
                "  --output FILE  - Write results to FILE\n"
@@ -108,10 +109,27 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+
+  int timeout_sec = 1;
+  int optionsStartIndex = 5;
+  if (argc >= 6) {
+    std::string maybe_timeout = argv[5];
+    if (!maybe_timeout.empty() && maybe_timeout[0] != '-') {
+      try {
+        timeout_sec = std::stoi(maybe_timeout);
+      } catch (...) {
+        std::cerr << "Invalid timeout value: " << maybe_timeout << std::endl;
+        return 1;
+      }
+      if (timeout_sec < 0) timeout_sec = 0;
+      optionsStartIndex = 6;
+    }
+  }
+
   // Парсим опции
   bool open_only = false;
   std::string output_file;
-  for (int i = 5; i < argc; ++i) {
+  for (int i = optionsStartIndex; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "--open-only")
       open_only = true;
@@ -172,7 +190,7 @@ int main(int argc, char *argv[]) {
     for (int port = start; port <= end; port++) {
       if (interrupted)
         break;
-      auto res = scan_ports(ip, port, port);
+      auto res = scan_ports(ip, port, port, timeout_sec);
       results.insert(results.end(), res.begin(), res.end());
       ++scanned_ports;
     }
