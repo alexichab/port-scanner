@@ -15,13 +15,14 @@ make
 ## Использование
 
 ```bash
-./scanner <ip> <start_port> <end_port> <num_threads> [--open-only] [--output <file>] [--help]
+./scanner <ip> <start_port> <end_port> <num_threads> [timeout-sec] [--open-only] [--output <file>] [--help]
 ```
 
 - `<ip>` — IP-адрес для сканирования (например, 127.0.0.1)
 - `<start_port>` — начальный порт диапазона
 - `<end_port>` — конечный порт диапазона 
 - `<num_threads>` — количество потоков (например, 2)
+- `[timeout-sec]` - необязательный аргумент (по умолчанию равен 1 секунде)
 
 ### Опции
 
@@ -32,6 +33,7 @@ make
 **Примеры:**
 ```bash
 ./scanner 127.0.0.1 8079 8094 2
+./scanner 127.0.0.1 8079 8094 2 10
 ./scanner 192.168.1.1 20 1024 8 --open-only
 ./scanner 10.0.0.5 1 1000 4 --output result.txt
 ./scanner --help
